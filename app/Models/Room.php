@@ -12,6 +12,7 @@ class Room extends Model
     protected $casts = [
         'allows_extra_bed' => 'boolean',
         'out_of_service' => 'boolean',
+        'needs_cleaning' => 'boolean',
     ];
 
     public function building()
@@ -42,25 +43,45 @@ class Room extends Model
             });
     }
 
-    // Estado para el semáforo: libre | reservada | ocupada | alerta
-    public function statusOn($date = null): string
+    // Estado para el semáforo, usando la reserva ya cargada (evita consultas repetidas)
+    // libre | reservada | ocupada | limpieza | mantencion
+    public function boardStatus(bool $showCleaning = true): string
     {
-        $date = Carbon::parse($date ?? today())->toDateString();
-
         if ($this->out_of_service) {
-            return 'alerta';
+            return 'mantencion';
         }
 
-        $reservation = $this->reservations()
-            ->whereIn('reservations.status', ['reservada', 'en_estadia'])
-            ->where('reservations.check_in_date', '<=', $date)
-            ->where('reservations.check_out_date', '>', $date)
-            ->first();
+        $reservation = $this->reservations->first();
 
-        if (! $reservation) {
-            return 'libre';
+        if ($reservation?->status === 'en_estadia') {
+            return 'ocupada';
         }
 
-        return $reservation->status === 'en_estadia' ? 'ocupada' : 'reservada';
+        if ($showCleaning && $this->needs_cleaning) {
+            return 'limpieza';
+        }
+
+        return $reservation ? 'reservada' : 'libre';
+    }
+
+        // Reserva que afecta a la habitación en una fecha (con huésped y servicios del día)
+    public function scopeWithStayOn($query, string $date)
+    {
+        return $query->with(['reservations' => function ($q) use ($date) {
+            $q->where(function ($w) use ($date) {
+                $w->where(fn ($r) => $r->where('reservations.status', 'reservada')
+                        ->where('reservations.check_in_date', '<=', $date)
+                        ->where('reservations.check_out_date', '>', $date))
+                ->orWhere(fn ($r) => $r->where('reservations.status', 'en_estadia')
+                        ->where('reservations.check_in_date', '<=', $date)
+                        ->where('reservations.check_out_date', '>=', $date));
+            })->with([
+                'holder.tags',
+                'serviceBookings' => fn ($s) => $s->whereDate('date', $date)
+                    ->where('status', '!=', 'cancelado')
+                    ->orderBy('start_time')
+                    ->with('service'),
+            ]);
+        }]);
     }
 }
